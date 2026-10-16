@@ -1,4 +1,5 @@
 import type { Page } from "playwright";
+import { gotoToleratingOtterNavigation } from "../browser/otterFlow";
 
 function normalizeWhitespace(value: string): string {
   return value.replace(/\s+/g, " ").trim();
@@ -146,7 +147,7 @@ async function readClipboardSummary(page: Page): Promise<string> {
 
   for (let index = 0; index < candidateUrls.length; index += 1) {
     if (index > 0 && candidateUrls[index] !== page.url()) {
-      await page.goto(candidateUrls[index], { waitUntil: "domcontentloaded" });
+      await gotoToleratingOtterNavigation(page, candidateUrls[index]);
       await page.waitForTimeout(600);
     }
 

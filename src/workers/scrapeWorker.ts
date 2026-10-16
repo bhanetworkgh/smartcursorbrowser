@@ -370,11 +370,13 @@ export function createScrapeWorker(jobStore: JobStore) {
         env.extractionTimeoutMs,
         "create browser session",
       );
-      await withTimeout(
-        session.page.goto(job.request.url, { waitUntil: "domcontentloaded" }),
-        env.extractionTimeoutMs,
-        "initial page navigation",
-      );
+      if (job.request.sourceType !== "otter" && job.request.sourceType !== "loom") {
+        await withTimeout(
+          session.page.goto(job.request.url, { waitUntil: "domcontentloaded" }),
+          env.extractionTimeoutMs,
+          "initial page navigation",
+        );
+      }
 
       if (job.request.sourceType === "otter") {
         effectiveOtterLoginFields = resolveOtterLoginFields(job.request.loginFields ?? []);

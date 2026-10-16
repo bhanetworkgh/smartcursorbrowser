@@ -48,12 +48,105 @@ const COOKIE_BANNER_BUTTONS = [
   "button:has-text('Allow All')",
 ];
 
+const OTTER_SIGNIN_URL = "https://otter.ai/signin";
+const NAVIGATION_RETRY_ATTEMPTS = 3;
+const NAVIGATION_RETRY_DELAY_MS = 300;
+
 function getLoginValue(fields: LoginFieldInput[], key: "email" | "password"): string {
   const found = fields.find((field) => field.name.toLowerCase().includes(key));
   if (!found?.value) {
     throw new Error(`Missing required login field: ${key}`);
   }
   return found.value;
+}
+
+export function isInterruptedNavigationError(error: unknown): boolean {
+  const message = error instanceof Error ? error.message : String(error);
+  return /interrupted by another navigation/i.test(message);
+}
+
+function conversationIdFromUrl(url: string): string | null {
+  try {
+    const match = new URL(url).pathname.match(/^\/u\/([^/]+)/i);
+    return match?.[1] ?? null;
+  } catch {
+    return null;
+  }
+}
+
+function isOtterAuthPath(url: string): boolean {
+  try {
+    return /\/(signin|password)(?:\/|$)/i.test(new URL(url).pathname);
+  } catch {
+    return /\/(signin|password)(?:[/?#]|$)/i.test(url);
+  }
+}
+
+function hasLandedOnTarget(currentUrl: string, targetUrl: string): boolean {
+  const targetId = conversationIdFromUrl(targetUrl);
+  if (targetId) {
+    return conversationIdFromUrl(currentUrl) === targetId;
+  }
+  try {
+    const current = new URL(currentUrl);
+    const target = new URL(targetUrl);
+    return current.origin === target.origin && current.pathname === target.pathname;
+  } catch {
+    return currentUrl.startsWith(targetUrl.split("?")[0] ?? targetUrl);
+  }
+}
+
+export async function gotoToleratingOtterNavigation(page: Page, url: string): Promise<void> {
+  let lastError: unknown;
+
+  for (let attempt = 0; attempt < NAVIGATION_RETRY_ATTEMPTS; attempt += 1) {
+    if (hasLandedOnTarget(page.url(), url)) {
+      return;
+    }
+
+    try {
+      await page.goto(url, { waitUntil: "domcontentloaded" });
+      if (hasLandedOnTarget(page.url(), url)) {
+        return;
+      }
+    } catch (error) {
+      lastError = error;
+      if (!isInterruptedNavigationError(error)) {
+        throw error;
+      }
+      if (hasLandedOnTarget(page.url(), url)) {
+        return;
+      }
+      try {
+        await page.waitForLoadState("domcontentloaded", { timeout: 5000 });
+      } catch {
+        // Competing SPA navigation may still be in flight.
+      }
+    }
+
+    await page.waitForTimeout(NAVIGATION_RETRY_DELAY_MS);
+  }
+
+  if (hasLandedOnTarget(page.url(), url)) {
+    return;
+  }
+  if (lastError) {
+    throw lastError;
+  }
+  throw new Error(`Otter navigation did not settle on ${url} (current: ${page.url()})`);
+}
+
+async function waitForOtterLoginRedirect(page: Page): Promise<void> {
+  try {
+    await page.waitForURL((nextUrl) => !isOtterAuthPath(nextUrl.toString()), { timeout: 15000 });
+  } catch {
+    // Profile API may already be authenticated while the tab is still on signin.
+  }
+  try {
+    await page.waitForLoadState("domcontentloaded", { timeout: 5000 });
+  } catch {
+    // Conversation navigation retries if a post-login /home redirect is still running.
+  }
 }
 
 async function clickFirstInteractable(page: Page, selectors: string[]): Promise<boolean> {
@@ -241,7 +334,7 @@ async function assertAuthenticatedProfile(page: Page, email: string): Promise<vo
 async function performPopupLogin(loginPage: Page, email: string, password: string): Promise<void> {
   await loginPage.waitForLoadState("domcontentloaded");
   if (!loginPage.url().includes("/signin")) {
-    await loginPage.goto("https://otter.ai/signin", { waitUntil: "domcontentloaded" });
+    await gotoToleratingOtterNavigation(loginPage, OTTER_SIGNIN_URL);
   }
 
   await dismissCookieBannerIfPresent(loginPage);
@@ -270,8 +363,9 @@ export async function performOtterLoginFlow(page: Page, url: string, loginFields
   const email = getLoginValue(loginFields, "email");
   const password = getLoginValue(loginFields, "password");
 
-  await page.goto("https://otter.ai/signin", { waitUntil: "domcontentloaded" });
+  await gotoToleratingOtterNavigation(page, OTTER_SIGNIN_URL);
   await performPopupLogin(page, email, password);
-  await page.goto(url, { waitUntil: "domcontentloaded" });
+  await waitForOtterLoginRedirect(page);
+  await gotoToleratingOtterNavigation(page, url);
   await page.waitForTimeout(800);
 }
