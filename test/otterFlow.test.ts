@@ -1,4 +1,4 @@
-import { describe, expect, it, vi } from "vitest";
+import { afterEach, describe, expect, it, vi } from "vitest";
 import {
   gotoToleratingOtterNavigation,
   isInterruptedNavigationError,
@@ -25,18 +25,49 @@ function createPage(initialUrl = "about:blank") {
   };
 }
 
+function scrapeMonitoringEvents(spy: { mock: { calls: unknown[][] } }) {
+  return spy.mock.calls
+    .map(([line]) => {
+      if (typeof line !== "string") {
+        return null;
+      }
+      try {
+        return JSON.parse(line) as {
+          scrapeMonitoring?: {
+            event?: string;
+            attempt?: number;
+            targetUrl?: string;
+            currentUrl?: string;
+            reason?: string;
+            message?: string;
+          };
+        };
+      } catch {
+        return null;
+      }
+    })
+    .filter((entry) => entry?.scrapeMonitoring?.event === "otter_navigation_retry")
+    .map((entry) => entry!.scrapeMonitoring!);
+}
+
 describe("gotoToleratingOtterNavigation", () => {
+  afterEach(() => {
+    vi.restoreAllMocks();
+  });
+
   it("detects Playwright interrupted-navigation errors", () => {
     expect(isInterruptedNavigationError(INTERRUPT_ERROR)).toBe(true);
     expect(isInterruptedNavigationError(new Error("Timeout 30000ms exceeded"))).toBe(false);
   });
 
   it("returns after a successful conversation navigation", async () => {
+    const logSpy = vi.spyOn(console, "log").mockImplementation(() => undefined);
     const page = createPage();
     await gotoToleratingOtterNavigation(page as never, CONVERSATION_URL);
     expect(page.goto).toHaveBeenCalledTimes(1);
     expect(page.goto).toHaveBeenCalledWith(CONVERSATION_URL, { waitUntil: "domcontentloaded" });
     expect(page.url()).toBe(CONVERSATION_URL);
+    expect(scrapeMonitoringEvents(logSpy)).toEqual([]);
   });
 
   it("treats an interrupted goto as success when the conversation URL already landed", async () => {
@@ -51,6 +82,7 @@ describe("gotoToleratingOtterNavigation", () => {
   });
 
   it("retries when Otter interrupts /u navigation with /home", async () => {
+    const logSpy = vi.spyOn(console, "log").mockImplementation(() => undefined);
     const page = createPage();
     page.goto
       .mockImplementationOnce(async () => {
@@ -64,9 +96,20 @@ describe("gotoToleratingOtterNavigation", () => {
     await gotoToleratingOtterNavigation(page as never, CONVERSATION_URL);
     expect(page.goto).toHaveBeenCalledTimes(2);
     expect(page.url()).toContain("/u/mockId");
+    expect(scrapeMonitoringEvents(logSpy)).toEqual([
+      {
+        event: "otter_navigation_retry",
+        attempt: 0,
+        targetUrl: CONVERSATION_URL,
+        currentUrl: HOME_URL,
+        reason: "playwright_interrupted",
+        message: INTERRUPT_ERROR.message,
+      },
+    ]);
   });
 
   it("retries when goto resolves but the SPA has already bounced to /home", async () => {
+    const logSpy = vi.spyOn(console, "log").mockImplementation(() => undefined);
     const page = createPage();
     page.goto
       .mockImplementationOnce(async () => {
@@ -79,6 +122,15 @@ describe("gotoToleratingOtterNavigation", () => {
     await gotoToleratingOtterNavigation(page as never, CONVERSATION_URL);
     expect(page.goto).toHaveBeenCalledTimes(2);
     expect(page.url()).toContain("/u/mockId");
+    expect(scrapeMonitoringEvents(logSpy)).toEqual([
+      expect.objectContaining({
+        event: "otter_navigation_retry",
+        attempt: 0,
+        targetUrl: CONVERSATION_URL,
+        currentUrl: HOME_URL,
+        reason: "url_mismatch",
+      }),
+    ]);
   });
 
   it("rethrows non-interrupt navigation errors immediately", async () => {

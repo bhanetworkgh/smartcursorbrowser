@@ -96,6 +96,27 @@ function hasLandedOnTarget(currentUrl: string, targetUrl: string): boolean {
   }
 }
 
+function logOtterNavigationRetry(
+  attempt: number,
+  targetUrl: string,
+  currentUrl: string,
+  reason: "playwright_interrupted" | "url_mismatch",
+  message: string,
+): void {
+  console.log(
+    JSON.stringify({
+      scrapeMonitoring: {
+        event: "otter_navigation_retry",
+        attempt,
+        targetUrl,
+        currentUrl,
+        reason,
+        message,
+      },
+    }),
+  );
+}
+
 export async function gotoToleratingOtterNavigation(page: Page, url: string): Promise<void> {
   let lastError: unknown;
 
@@ -104,11 +125,15 @@ export async function gotoToleratingOtterNavigation(page: Page, url: string): Pr
       return;
     }
 
+    let retryReason: "playwright_interrupted" | "url_mismatch" = "url_mismatch";
+    let retryMessage = `Otter navigation landed on ${page.url()} instead of ${url}`;
+
     try {
       await page.goto(url, { waitUntil: "domcontentloaded" });
       if (hasLandedOnTarget(page.url(), url)) {
         return;
       }
+      retryMessage = `Otter navigation landed on ${page.url()} instead of ${url}`;
     } catch (error) {
       lastError = error;
       if (!isInterruptedNavigationError(error)) {
@@ -117,11 +142,17 @@ export async function gotoToleratingOtterNavigation(page: Page, url: string): Pr
       if (hasLandedOnTarget(page.url(), url)) {
         return;
       }
+      retryReason = "playwright_interrupted";
+      retryMessage = error instanceof Error ? error.message : String(error);
       try {
         await page.waitForLoadState("domcontentloaded", { timeout: 5000 });
       } catch {
         // Competing SPA navigation may still be in flight.
       }
+    }
+
+    if (attempt + 1 < NAVIGATION_RETRY_ATTEMPTS) {
+      logOtterNavigationRetry(attempt, url, page.url(), retryReason, retryMessage);
     }
 
     await page.waitForTimeout(NAVIGATION_RETRY_DELAY_MS);
