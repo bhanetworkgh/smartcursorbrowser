@@ -208,6 +208,29 @@ async function fillFirstInteractable(page: Page, selectors: string[], value: str
   return false;
 }
 
+// Otter changes the address to /password before it draws the password box, so a single
+// look right after the email step can find nothing (15 Oct 2026: the job failed, and the
+// debug snapshot 1.6 s later showed the box visible). Keep trying until it appears.
+export const PASSWORD_INPUT_WAIT_MS = 10000;
+
+export async function fillWhenInputAppears(
+  page: Page,
+  selectors: string[],
+  value: string,
+  timeoutMs: number,
+): Promise<boolean> {
+  const deadline = Date.now() + timeoutMs;
+  for (;;) {
+    if (await fillFirstInteractable(page, selectors, value)) {
+      return true;
+    }
+    if (Date.now() >= deadline) {
+      return false;
+    }
+    await page.waitForTimeout(250);
+  }
+}
+
 async function hasVisibleInput(page: Page, selectors: string[]): Promise<boolean> {
   for (const selector of selectors) {
     const locator = page.locator(selector);
@@ -347,7 +370,12 @@ async function performPopupLogin(loginPage: Page, email: string, password: strin
 
   await submitAndAwaitPasswordStep(loginPage);
 
-  const passwordFilled = await fillFirstInteractable(loginPage, PASSWORD_SELECTORS, password);
+  const passwordFilled = await fillWhenInputAppears(
+    loginPage,
+    PASSWORD_SELECTORS,
+    password,
+    PASSWORD_INPUT_WAIT_MS,
+  );
   if (!passwordFilled) {
     throw new Error("Unable to locate Otter password input");
   }
@@ -355,6 +383,8 @@ async function performPopupLogin(loginPage: Page, email: string, password: strin
   await submitPassword(loginPage);
   await assertAuthenticatedProfile(loginPage, email);
 }
+
+export { PASSWORD_SELECTORS };
 
 export async function performOtterLoginFlow(page: Page, url: string, loginFields: LoginFieldInput[]): Promise<void> {
   if (loginFields.length === 0) {

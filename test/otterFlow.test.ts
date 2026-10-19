@@ -1,6 +1,8 @@
 import { describe, expect, it, vi } from "vitest";
 import {
+  fillWhenInputAppears,
   gotoToleratingOtterNavigation,
+  PASSWORD_SELECTORS,
   isInterruptedNavigationError,
 } from "../src/services/browser/otterFlow";
 
@@ -102,5 +104,52 @@ describe("gotoToleratingOtterNavigation", () => {
       /interrupted by another navigation/,
     );
     expect(page.goto).toHaveBeenCalledTimes(3);
+  });
+});
+
+function createPasswordPage(appearsAfterLooks: number) {
+  let looks = 0;
+  const filled: string[] = [];
+  const page = {
+    locator: vi.fn((selector: string) => {
+      const ready = () => selector === "input[type='password']" && looks > appearsAfterLooks;
+      return {
+        count: vi.fn(async () => {
+          if (selector === "input[type='password']") looks += 1;
+          return ready() ? 1 : 0;
+        }),
+        nth: () => ({
+          isVisible: vi.fn(async () => ready()),
+          isEnabled: vi.fn(async () => true),
+          fill: vi.fn(async (value: string) => {
+            filled.push(value);
+          }),
+        }),
+      };
+    }),
+    waitForTimeout: vi.fn(async () => undefined),
+  };
+  return { page, filled };
+}
+
+describe("fillWhenInputAppears", () => {
+  it("waits for a password box Otter draws after the address changes", async () => {
+    const { page, filled } = createPasswordPage(3);
+    await expect(fillWhenInputAppears(page as never, PASSWORD_SELECTORS, "secret", 10000)).resolves.toBe(true);
+    expect(filled).toEqual(["secret"]);
+    expect(page.waitForTimeout).toHaveBeenCalled();
+  });
+
+  it("fills at once when the box is already there", async () => {
+    const { page, filled } = createPasswordPage(0);
+    await expect(fillWhenInputAppears(page as never, PASSWORD_SELECTORS, "secret", 10000)).resolves.toBe(true);
+    expect(filled).toEqual(["secret"]);
+    expect(page.waitForTimeout).not.toHaveBeenCalled();
+  });
+
+  it("gives up after the wait when the box never appears", async () => {
+    const { page, filled } = createPasswordPage(Number.POSITIVE_INFINITY);
+    await expect(fillWhenInputAppears(page as never, PASSWORD_SELECTORS, "secret", 0)).resolves.toBe(false);
+    expect(filled).toEqual([]);
   });
 });
